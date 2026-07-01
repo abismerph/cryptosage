@@ -1,0 +1,302 @@
+# CryptoSage AI — Bundle: 1_setup
+# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =
+
+# FILE: .env.example
+# ----------------------------------------------------------------------
+# ─────────────────────────────────────────────
+# CryptoSage AI — Environment Variables
+# Copy to .env and fill in your values
+# ─────────────────────────────────────────────
+
+# App
+APP_NAME="CryptoSage AI"
+APP_ENV=development          # development | staging | production
+APP_VERSION=1.0.0
+DEBUG=true
+SECRET_KEY=your-super-secret-key-min-32-chars-here
+ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
+
+# Database
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/cryptosage
+DATABASE_URL_SYNC=postgresql://postgres:password@localhost:5432/cryptosage
+
+# Redis
+REDIS_URL=redis://localhost:6379/0
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_CHAT_MODEL=gpt-4o
+
+# Anthropic (fallback LLM)
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_CHAT_MODEL=claude-3-5-sonnet-20241022
+
+# Pinecone
+PINECONE_API_KEY=pcsk_...
+PINECONE_INDEX_NAME=cryptosage-news
+PINECONE_ENVIRONMENT=us-east-1
+
+# Clerk (Auth)
+CLERK_SECRET_KEY=sk_test_...
+CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_WEBHOOK_SECRET=whsec_...
+
+# Stripe (Payments)
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID_PRO_MONTHLY=price_...
+STRIPE_PRICE_ID_PRO_ANNUAL=price_...
+STRIPE_PRICE_ID_ENTERPRISE=price_...
+
+# Resend (Email)
+RESEND_API_KEY=re_...
+RESEND_FROM_EMAIL=digest@cryptosage.ai
+RESEND_FROM_NAME="CryptoSage AI"
+
+# Sentry
+SENTRY_DSN=https://...@sentry.io/...
+
+# PostHog
+POSTHOG_API_KEY=phc_...
+POSTHOG_HOST=https://app.posthog.com
+
+# Rate Limits (per minute)
+RATE_LIMIT_FREE=10
+RATE_LIMIT_PRO=120
+RATE_LIMIT_ENTERPRISE=600
+
+# Feature Limits (per day)
+FREE_EXPLAIN_LIMIT=5
+FREE_WATCHLIST_LIMIT=3
+PRO_WHITEPAPER_LIMIT=10
+PRO_API_CALLS_LIMIT=1000
+
+# Ingestion
+NEWS_INGEST_INTERVAL_MINUTES=120
+NEWS_SOURCES_CONFIG_PATH=config/news_sources.json
+
+
+# END: .env.example
+# ======================================================================
+
+# FILE: .gitignore
+# ----------------------------------------------------------------------
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Alembic
+alembic/versions/*.py
+
+# Docker
+*.log
+docker-compose.override.yml
+
+
+# END: .gitignore
+# ======================================================================
+
+# FILE: requirements.txt
+# ----------------------------------------------------------------------
+# CryptoSage AI — FastAPI Backend Dependencies
+# Python 3.11+
+
+# --- Web Framework ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
+
+# --- Database ---
+sqlalchemy==2.0.30
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# --- Caching ---
+redis==5.0.4
+hiredis==2.3.2
+
+# --- AI / LLM ---
+openai==1.35.0
+anthropic==0.28.0
+langchain==0.2.6
+langchain-openai==0.1.14
+langchain-community==0.2.6
+langchain-core==0.2.10
+llama-index==0.10.50
+tiktoken==0.7.0
+
+# --- Vector Database ---
+pinecone-client==4.1.0
+chromadb==0.5.0
+
+# --- News Ingestion ---
+feedparser==6.0.11
+crawl4ai==0.2.77
+httpx==0.27.0
+aiohttp==3.9.5
+newspaper3k==0.2.8
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# --- Auth ---
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+httpx==0.27.0
+
+# --- Task Queue ---
+celery==5.4.0
+celery[redis]==5.4.0
+flower==2.0.1
+
+# --- Email ---
+resend==0.8.0
+jinja2==3.1.4
+
+# --- Validation & Config ---
+pydantic==2.7.4
+pydantic-settings==2.3.4
+python-dotenv==1.0.1
+email-validator==2.2.0
+
+# --- Monitoring ---
+sentry-sdk[fastapi]==2.5.1
+posthog==3.5.0
+
+# --- Utilities ---
+tenacity==8.4.1
+structlog==24.2.0
+python-slugify==8.0.4
+pytz==2024.1
+aiofiles==23.2.1
+orjson==3.10.5
+
+# --- Testing ---
+pytest==8.2.2
+pytest-asyncio==0.23.7
+httpx==0.27.0
+factory-boy==3.3.0
+
+
+# END: requirements.txt
+# ======================================================================
+
+# FILE: alembic.ini
+# ----------------------------------------------------------------------
+# Alembic Configuration — CryptoSage AI
+[alembic]
+script_location = alembic
+prepend_sys_path = .
+version_path_separator = os
+sqlalchemy.url = driver://user:pass@localhost/dbname
+
+[post_write_hooks]
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S
+
+
+# END: alembic.ini
+# ======================================================================
+
+# FILE: pytest.ini
+# ----------------------------------------------------------------------
+[pytest]
+asyncio_mode = auto
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+addopts = -v --tb=short -p no:warnings
+filterwarnings =
+    ignore::DeprecationWarning
+    ignore::PendingDeprecationWarning
+
+
+# END: pytest.ini
+# ======================================================================
+
+# FILE: config/news_sources.json
+# ----------------------------------------------------------------------
+[
+  {"name": "CoinDesk",         "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",  "type": "rss", "tier": 1},
+  {"name": "Decrypt",          "url": "https://decrypt.co/feed",                           "type": "rss", "tier": 1},
+  {"name": "The Block",        "url": "https://www.theblock.co/rss.xml",                   "type": "rss", "tier": 1},
+  {"name": "Cointelegraph",    "url": "https://cointelegraph.com/rss",                      "type": "rss", "tier": 1},
+  {"name": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/.rss/full/",             "type": "rss", "tier": 1},
+  {"name": "CryptoSlate",      "url": "https://cryptoslate.com/feed/",                     "type": "rss", "tier": 2},
+  {"name": "BeInCrypto",       "url": "https://beincrypto.com/feed/",                      "type": "rss", "tier": 2},
+  {"name": "DL News",          "url": "https://www.dlnews.com/arc/outboundfeeds/rss/",     "type": "rss", "tier": 2},
+  {"name": "Blockworks",       "url": "https://blockworks.co/feed",                        "type": "rss", "tier": 1},
+  {"name": "The Defiant",      "url": "https://thedefiant.io/api/feeds/rss.xml",           "type": "rss", "tier": 2},
+  {"name": "Unchained",        "url": "https://unchainedcrypto.com/feed/",                 "type": "rss", "tier": 2},
+  {"name": "Protos",           "url": "https://protos.com/feed/",                          "type": "rss", "tier": 2},
+  {"name": "CoinGape",         "url": "https://coingape.com/feed/",                        "type": "rss", "tier": 3},
+  {"name": "AMBCrypto",        "url": "https://ambcrypto.com/feed/",                       "type": "rss", "tier": 3},
+  {"name": "NewsBTC",          "url": "https://www.newsbtc.com/feed/",                     "type": "rss", "tier": 3},
+  {"name": "CryptoNews",       "url": "https://cryptonews.com/news/feed/",                 "type": "rss", "tier": 3}
+]
+
+
+# END: config/news_sources.json
+# ======================================================================

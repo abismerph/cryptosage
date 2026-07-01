@@ -1,0 +1,1101 @@
+# CryptoSage AI — Bundle: 4_ai_services
+# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =
+
+# FILE: app/services/ai/prompts.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Centralized Prompt Templates
+All prompts are versioned. Load active version from DB at runtime;
+fall back to these defaults during startup / cold boot.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPLAINER  (SageMode™)
+# ─────────────────────────────────────────────────────────────────────────────
+EXPLAINER_SYSTEM = """You are CryptoSage, a world-class crypto educator who explains \
+blockchain concepts with crystal clarity, accuracy, and zero jargon. \
+Always use plain English. When explaining technical concepts, lead with a \
+real-world analogy, then give the technical definition. \
+Target audience: intelligent adults with no crypto background. \
+Never give investment advice. Never recommend buying or selling any asset. \
+If a query is completely unrelated to crypto/finance/technology, politely \
+decline and redirect."""
+
+EXPLAINER_USER_TEMPLATE = """CONTEXT (retrieved articles — use as grounding):
+{context}
+
+USER QUERY: {query}
+{coin_context_block}
+
+TASK: Explain this concept in three parts:
+1. simple     — One clear sentence in plain English (max 30 words)
+2. analogy    — A vivid real-world analogy that clicks instantly
+3. why_it_matters — Why this matters to an everyday investor (max 40 words)
+4. deep_dive  — ONLY if mode=pro: A thorough technical explanation (2-3 paragraphs)
+5. related_terms — 3-5 related crypto concepts worth exploring next
+
+OUTPUT: Valid JSON only. No markdown fences. No extra keys.
+{{
+  "simple": "...",
+  "analogy": "...",
+  "why_it_matters": "...",
+  "deep_dive": "..." | null,
+  "related_terms": ["term1", "term2", "term3"]
+}}"""
+
+EXPLAINER_VERSION = "v1.2"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEWS SUMMARIZER  (ClarityFeed™)
+# ─────────────────────────────────────────────────────────────────────────────
+SUMMARIZER_SYSTEM = """You are a senior crypto market analyst producing a daily \
+intelligence briefing for retail investors. Write concisely and factually. \
+Prioritize substance over hype. Flag genuine risks clearly. \
+Never speculate beyond what the articles support. \
+Never give investment advice or price predictions."""
+
+SUMMARIZER_USER_TEMPLATE = """TODAY'S ARTICLES ({article_count} articles, {date}):
+{articles_block}
+
+TASK: Produce a structured daily digest:
+1. executive_summary  — 3 sentences capturing today's overall crypto landscape
+2. top_stories        — Top {top_n} stories (ranked by importance_score), each with:
+   - headline, source, url, summary (2 sentences), sentiment, sentiment_score (0-100), coins_mentioned
+3. key_risk           — The single most important risk investors should watch today
+4. overall_sentiment  — bullish | bearish | neutral
+5. overall_sentiment_score — 0-100
+
+OUTPUT: Valid JSON only. No markdown fences.
+{{
+  "executive_summary": "...",
+  "top_stories": [...],
+  "key_risk": "...",
+  "overall_sentiment": "...",
+  "overall_sentiment_score": 0
+}}"""
+
+SUMMARIZER_VERSION = "v1.1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SENTIMENT ANALYZER  (PulseCheck™)
+# ─────────────────────────────────────────────────────────────────────────────
+SENTIMENT_SYSTEM = """You are a crypto market sentiment analyst. \
+Given news headlines and social signals, produce a calibrated sentiment score. \
+Base sentiment on news substance and market events — not price action alone. \
+Avoid recency bias. Be conservative: reserve 80-100 for extraordinary bullish consensus only."""
+
+SENTIMENT_USER_TEMPLATE = """COIN: {coin_name} ({coin_symbol})
+TIME WINDOW: Last {hours} hours
+
+HEADLINES:
+{headlines_block}
+
+TASK: Analyze sentiment and output:
+- score        — Integer 0-100 (0=extremely bearish, 100=extremely bullish)
+- label        — "Bearish" | "Neutral" | "Bullish" | "Very Bullish"
+- label_emoji  — Single emoji representing the label
+- key_drivers  — 2-4 specific drivers, each with: driver (string), impact (positive|negative|neutral)
+- headline_sample — Top 3 most impactful headlines (strings)
+- articles_analyzed — int
+
+CALIBRATION:
+  0-25  = Bearish   | 26-45 = Neutral     | 46-65 = Bullish | 66-100 = Very Bullish
+
+OUTPUT: Valid JSON only.
+{{
+  "score": 0,
+  "label": "...",
+  "label_emoji": "...",
+  "key_drivers": [{{"driver": "...", "impact": "..."}}],
+  "headline_sample": ["..."],
+  "articles_analyzed": 0
+}}"""
+
+SENTIMENT_VERSION = "v1.0"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WHITEPAPER ANALYZER  (DeepRead™)
+# ─────────────────────────────────────────────────────────────────────────────
+WHITEPAPER_SYSTEM = """You are a professional crypto analyst reviewing a whitepaper \
+for retail investors. Summarize objectively and thoroughly. \
+Flag red flags clearly and specifically. Never hype or shill. \
+This is a factual due-diligence summary — not investment advice. \
+Always include the disclaimer."""
+
+WHITEPAPER_USER_TEMPLATE = """PROJECT: {project_name}
+SOURCE: {source_url}
+
+WHITEPAPER CONTENT (extracted chunks):
+{document_chunks}
+
+TASK: Produce a due-diligence summary:
+1. one_liner            — What the project does in one sentence
+2. token_utility        — Plain-English token economics: supply, distribution, utility
+3. team_signals         — Anonymity, track record, advisors, red flags
+4. tech_differentiation — What makes the tech unique vs competitors
+5. risk_factors         — Up to 5 risks, each with: factor (string), severity (low|medium|high)
+6. overall_impression   — "Strong" | "Moderate" | "Weak"
+7. overall_impression_emoji — Single emoji
+
+OUTPUT: Valid JSON only.
+{{
+  "one_liner": "...",
+  "token_utility": "...",
+  "team_signals": "...",
+  "tech_differentiation": "...",
+  "risk_factors": [{{"factor": "...", "severity": "..."}}],
+  "overall_impression": "...",
+  "overall_impression_emoji": "..."
+}}"""
+
+WHITEPAPER_VERSION = "v1.0"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUARDRAIL POST-PROCESSOR
+# ─────────────────────────────────────────────────────────────────────────────
+GUARDRAIL_SYSTEM = """You are a compliance checker for a crypto information platform. \
+Review the following AI-generated text and determine if it contains any of:
+- Explicit investment advice (buy / sell / hold recommendations with conviction)
+- Price predictions presented as fact
+- False claims about specific projects or people
+- Promises of financial returns
+
+Respond with JSON only: {{"compliant": true}} or {{"compliant": false, "issue": "brief description"}}"""
+
+GUARDRAIL_VERSION = "v1.0"
+
+
+# END: app/services/ai/prompts.py
+# ======================================================================
+
+# FILE: app/services/ai/llm_client.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — LLM Client
+Wraps OpenAI (primary) and Anthropic (fallback) with retry logic,
+token counting, and latency tracking.
+"""
+import json
+import time
+from typing import Any
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import structlog
+from openai import AsyncOpenAI, RateLimitError, APITimeoutError
+from anthropic import AsyncAnthropic
+
+from app.core.config import settings
+
+log = structlog.get_logger(__name__)
+
+openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+anthropic_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY) if settings.ANTHROPIC_API_KEY else None
+
+
+# ── Retry Decorator ───────────────────────────────────────────────────────────
+def with_llm_retry(func):
+    return retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError)),
+        reraise=True,
+    )(func)
+
+
+# ── Core Chat Completion ──────────────────────────────────────────────────────
+@with_llm_retry
+async def chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    response_format: str = "json",   # "json" | "text"
+) -> dict[str, Any]:
+    """
+    Calls OpenAI chat completion with structured JSON output.
+    Falls back to Anthropic on repeated failure.
+
+    Returns:
+        {
+          "content": dict | str,    # parsed JSON or raw text
+          "input_tokens": int,
+          "output_tokens": int,
+          "latency_ms": float,
+          "model": str,
+        }
+    """
+    _model = model or settings.OPENAI_CHAT_MODEL
+    _temperature = temperature if temperature is not None else settings.OPENAI_TEMPERATURE
+    _max_tokens = max_tokens or settings.OPENAI_MAX_TOKENS
+
+    t0 = time.perf_counter()
+
+    kwargs: dict[str, Any] = dict(
+        model=_model,
+        temperature=_temperature,
+        max_tokens=_max_tokens,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+    )
+    if response_format == "json":
+        kwargs["response_format"] = {"type": "json_object"}
+
+    response = await openai_client.chat.completions.create(**kwargs)
+
+    latency_ms = (time.perf_counter() - t0) * 1000
+    raw = response.choices[0].message.content or ""
+
+    content: dict | str
+    if response_format == "json":
+        try:
+            content = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            log.warning("llm_json_parse_error", raw=raw[:200], error=str(exc))
+            content = {"raw": raw}
+    else:
+        content = raw
+
+    log.info(
+        "llm_call_complete",
+        model=_model,
+        input_tokens=response.usage.prompt_tokens,
+        output_tokens=response.usage.completion_tokens,
+        latency_ms=round(latency_ms, 1),
+    )
+
+    return {
+        "content": content,
+        "input_tokens": response.usage.prompt_tokens,
+        "output_tokens": response.usage.completion_tokens,
+        "latency_ms": round(latency_ms, 1),
+        "model": _model,
+    }
+
+
+# ── Anthropic Fallback ────────────────────────────────────────────────────────
+async def chat_completion_anthropic(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1024,
+) -> dict[str, Any]:
+    """Fallback to Claude when OpenAI is unavailable."""
+    if anthropic_client is None:
+        raise RuntimeError("Anthropic client not configured (ANTHROPIC_API_KEY missing)")
+
+    t0 = time.perf_counter()
+    response = await anthropic_client.messages.create(
+        model=settings.ANTHROPIC_CHAT_MODEL,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    latency_ms = (time.perf_counter() - t0) * 1000
+    raw = response.content[0].text if response.content else ""
+
+    try:
+        content = json.loads(raw)
+    except json.JSONDecodeError:
+        content = {"raw": raw}
+
+    return {
+        "content": content,
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+        "latency_ms": round(latency_ms, 1),
+        "model": settings.ANTHROPIC_CHAT_MODEL,
+    }
+
+
+# ── Guardrail Check ───────────────────────────────────────────────────────────
+async def run_guardrail(text: str) -> tuple[bool, str | None]:
+    """
+    Runs the compliance guardrail on generated text.
+    Returns (is_compliant, issue_description | None).
+    """
+    from app.services.ai.prompts import GUARDRAIL_SYSTEM
+
+    result = await chat_completion(
+        system_prompt=GUARDRAIL_SYSTEM,
+        user_prompt=f"TEXT TO REVIEW:\n{text[:3000]}",
+        temperature=0.0,
+        max_tokens=128,
+        response_format="json",
+    )
+    data = result["content"]
+    compliant: bool = data.get("compliant", True)
+    issue: str | None = data.get("issue")
+    return compliant, issue
+
+
+# END: app/services/ai/llm_client.py
+# ======================================================================
+
+# FILE: app/services/ai/rag.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — RAG Pipeline
+Handles embedding generation, Pinecone upsert/query, and context retrieval.
+"""
+import hashlib
+import uuid
+from typing import Any
+import structlog
+from openai import AsyncOpenAI
+from pinecone import Pinecone, ServerlessSpec
+
+from app.core.config import settings
+
+log = structlog.get_logger(__name__)
+
+# ── Clients ───────────────────────────────────────────────────────────────────
+_openai = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+_pinecone: Pinecone | None = None
+_index = None
+
+
+def get_pinecone_index():
+    """Lazy-initialize Pinecone client and index."""
+    global _pinecone, _index
+    if _index is None:
+        _pinecone = Pinecone(api_key=settings.PINECONE_API_KEY)
+        existing = [i.name for i in _pinecone.list_indexes()]
+        if settings.PINECONE_INDEX_NAME not in existing:
+            log.info("pinecone_creating_index", name=settings.PINECONE_INDEX_NAME)
+            _pinecone.create_index(
+                name=settings.PINECONE_INDEX_NAME,
+                dimension=settings.PINECONE_EMBEDDING_DIMENSION,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region=settings.PINECONE_ENVIRONMENT),
+            )
+        _index = _pinecone.Index(settings.PINECONE_INDEX_NAME)
+    return _index
+
+
+# ── Embedding ─────────────────────────────────────────────────────────────────
+async def embed_text(text: str) -> list[float]:
+    """Generate a text embedding vector via OpenAI."""
+    # Truncate to safe token limit for embedding model
+    text = text[:8000]
+    response = await _openai.embeddings.create(
+        input=text,
+        model=settings.OPENAI_EMBEDDING_MODEL,
+    )
+    return response.data[0].embedding
+
+
+async def embed_batch(texts: list[str]) -> list[list[float]]:
+    """Batch embed up to 100 texts in a single API call."""
+    texts = [t[:8000] for t in texts]
+    response = await _openai.embeddings.create(
+        input=texts,
+        model=settings.OPENAI_EMBEDDING_MODEL,
+    )
+    return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+
+
+# ── Upsert ────────────────────────────────────────────────────────────────────
+async def upsert_article(
+    article_id: str,
+    title: str,
+    content: str,
+    metadata: dict[str, Any],
+) -> str:
+    """
+    Embed an article and upsert it into Pinecone.
+    Returns the Pinecone vector ID.
+    """
+    combined_text = f"{title}\n\n{content}"
+    vector = await embed_text(combined_text)
+    pinecone_id = f"article-{article_id}"
+
+    index = get_pinecone_index()
+    index.upsert(
+        vectors=[{
+            "id": pinecone_id,
+            "values": vector,
+            "metadata": {
+                "article_id": article_id,
+                "title": title[:256],
+                "source": metadata.get("source_name", ""),
+                "coins": metadata.get("coins_mentioned", []),
+                "sentiment": metadata.get("sentiment", "neutral"),
+                "published_at": metadata.get("published_at", ""),
+                **{k: v for k, v in metadata.items() if k not in ("content",)},
+            },
+        }]
+    )
+    log.info("pinecone_upsert", pinecone_id=pinecone_id)
+    return pinecone_id
+
+
+async def upsert_batch(records: list[dict[str, Any]]) -> int:
+    """
+    Batch upsert articles into Pinecone.
+    Each record: {id, title, content, metadata}
+    Returns count of upserted vectors.
+    """
+    if not records:
+        return 0
+
+    texts = [f"{r['title']}\n\n{r['content']}" for r in records]
+    vectors = await embed_batch(texts)
+
+    pinecone_records = []
+    for record, vector in zip(records, vectors):
+        pinecone_id = f"article-{record['id']}"
+        pinecone_records.append({
+            "id": pinecone_id,
+            "values": vector,
+            "metadata": {
+                "article_id": record["id"],
+                "title": record["title"][:256],
+                **{k: v for k, v in record.get("metadata", {}).items()},
+            },
+        })
+
+    index = get_pinecone_index()
+    # Pinecone recommends batches of ≤100
+    batch_size = 100
+    for i in range(0, len(pinecone_records), batch_size):
+        index.upsert(vectors=pinecone_records[i : i + batch_size])
+
+    log.info("pinecone_batch_upsert", count=len(pinecone_records))
+    return len(pinecone_records)
+
+
+# ── Query ─────────────────────────────────────────────────────────────────────
+async def retrieve_context(
+    query: str,
+    top_k: int | None = None,
+    coin_filter: str | None = None,
+    min_score: float = 0.70,
+) -> list[dict[str, Any]]:
+    """
+    Retrieve the most semantically similar articles from Pinecone.
+    Returns a list of metadata dicts sorted by relevance score.
+
+    Args:
+        query:       The search query (e.g. "liquid staking risks")
+        top_k:       Number of results to return (default: settings.PINECONE_TOP_K)
+        coin_filter: Optional coin ticker to filter results (e.g. "ETH")
+        min_score:   Minimum cosine similarity threshold (0-1)
+    """
+    _top_k = top_k or settings.PINECONE_TOP_K
+    query_vector = await embed_text(query)
+
+    filter_dict: dict | None = None
+    if coin_filter:
+        filter_dict = {"coins": {"$in": [coin_filter.upper()]}}
+
+    index = get_pinecone_index()
+    response = index.query(
+        vector=query_vector,
+        top_k=_top_k,
+        include_metadata=True,
+        filter=filter_dict,
+    )
+
+    results = []
+    for match in response.matches:
+        if match.score >= min_score:
+            results.append({
+                "pinecone_id": match.id,
+                "score": round(match.score, 4),
+                **match.metadata,
+            })
+
+    log.info("pinecone_query", query=query[:60], results=len(results), top_k=_top_k)
+    return results
+
+
+def format_context_block(results: list[dict[str, Any]], max_chars: int = 6000) -> str:
+    """
+    Format RAG results into a clean text block for injection into prompts.
+    Truncates to stay within token budget.
+    """
+    if not results:
+        return "No relevant articles found in the knowledge base."
+
+    lines = []
+    total_chars = 0
+    for i, r in enumerate(results, 1):
+        snippet = (
+            f"[{i}] {r.get('title', 'Untitled')}\n"
+            f"    Source: {r.get('source', 'Unknown')} | "
+            f"Relevance: {r.get('score', 0):.2f}\n"
+            f"    URL: {r.get('url', '')}\n"
+        )
+        if total_chars + len(snippet) > max_chars:
+            break
+        lines.append(snippet)
+        total_chars += len(snippet)
+
+    return "\n".join(lines)
+
+
+# END: app/services/ai/rag.py
+# ======================================================================
+
+# FILE: app/services/ai/explainer.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — SageMode™ Explainer Service
+Orchestrates RAG retrieval + LLM call + guardrail check for concept explanations.
+"""
+import hashlib
+from datetime import datetime
+import structlog
+
+from app.core.config import settings
+from app.core.redis import cache_get, cache_set, key_explain
+from app.services.ai.prompts import (
+    EXPLAINER_SYSTEM, EXPLAINER_USER_TEMPLATE, EXPLAINER_VERSION
+)
+from app.services.ai.llm_client import chat_completion, run_guardrail
+from app.services.ai.rag import retrieve_context, format_context_block
+from app.schemas.explain import ExplainRequest, ExplainResponse
+
+log = structlog.get_logger(__name__)
+
+
+async def explain_concept(request: ExplainRequest, user_id: str) -> ExplainResponse:
+    """
+    Main entry point for the Crypto Explainer feature.
+
+    Flow:
+      1. Check Redis cache (24h TTL for identical queries)
+      2. Retrieve relevant articles via RAG
+      3. Build prompt and call LLM
+      4. Run compliance guardrail
+      5. Cache result and return
+    """
+    # ── 1. Cache check ────────────────────────────────────────────────────────
+    query_hash = hashlib.sha256(
+        f"{request.query.lower().strip()}:{request.mode}:{request.coin_context or ''}".encode()
+    ).hexdigest()[:16]
+    cache_key = key_explain(query_hash)
+
+    cached = await cache_get(cache_key)
+    if cached:
+        log.info("explain_cache_hit", query=request.query, user=user_id)
+        return ExplainResponse(**cached, cached=True)
+
+    # ── 2. RAG retrieval ──────────────────────────────────────────────────────
+    rag_results = await retrieve_context(
+        query=request.query,
+        top_k=6,
+        coin_filter=request.coin_context,
+    )
+    context_block = format_context_block(rag_results)
+    source_urls = [r.get("url", "") for r in rag_results if r.get("url")]
+
+    # ── 3. Build prompt ───────────────────────────────────────────────────────
+    coin_context_block = (
+        f"COIN CONTEXT: The user is specifically asking about this in relation to {request.coin_context}."
+        if request.coin_context else ""
+    )
+    user_prompt = EXPLAINER_USER_TEMPLATE.format(
+        context=context_block,
+        query=request.query,
+        coin_context_block=coin_context_block,
+        mode=request.mode,
+    )
+
+    # ── 4. LLM call ───────────────────────────────────────────────────────────
+    result = await chat_completion(
+        system_prompt=EXPLAINER_SYSTEM,
+        user_prompt=user_prompt,
+        temperature=0.4 if request.mode == "simple" else 0.3,
+        max_tokens=1024 if request.mode == "simple" else 2048,
+        response_format="json",
+    )
+    data: dict = result["content"]
+
+    # ── 5. Guardrail ──────────────────────────────────────────────────────────
+    combined_text = " ".join([
+        data.get("simple", ""),
+        data.get("analogy", ""),
+        data.get("why_it_matters", ""),
+        data.get("deep_dive", "") or "",
+    ])
+    compliant, issue = await run_guardrail(combined_text)
+    if not compliant:
+        log.warning("guardrail_triggered", issue=issue, query=request.query, user=user_id)
+        # Sanitize: clear the non-compliant field
+        data["why_it_matters"] = (
+            "This concept has market implications — consult a financial advisor "
+            "for personalized investment guidance."
+        )
+
+    # ── 6. Build response & cache ─────────────────────────────────────────────
+    response_data = {
+        "query": request.query,
+        "simple": data.get("simple", ""),
+        "analogy": data.get("analogy", ""),
+        "why_it_matters": data.get("why_it_matters", ""),
+        "deep_dive": data.get("deep_dive") if request.mode == "pro" else None,
+        "related_terms": data.get("related_terms", [])[:5],
+        "sources": source_urls[:5],
+        "prompt_version": EXPLAINER_VERSION,
+        "cached": False,
+    }
+
+    await cache_set(cache_key, response_data, ttl=settings.CACHE_TTL_EXPLAIN)
+
+    log.info(
+        "explain_complete",
+        query=request.query,
+        mode=request.mode,
+        latency_ms=result["latency_ms"],
+        user=user_id,
+    )
+    return ExplainResponse(**response_data)
+
+
+# END: app/services/ai/explainer.py
+# ======================================================================
+
+# FILE: app/services/ai/summarizer.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — ClarityFeed™ News Summarizer Service
+Pulls today's top articles from DB, runs LLM summarization pipeline,
+caches the result, and returns a structured daily digest.
+"""
+from datetime import datetime, date, timezone, timedelta
+import structlog
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.redis import cache_get, cache_set, key_daily_summary
+from app.models.article import Article
+from app.services.ai.prompts import (
+    SUMMARIZER_SYSTEM, SUMMARIZER_USER_TEMPLATE, SUMMARIZER_VERSION
+)
+from app.services.ai.llm_client import chat_completion
+from app.schemas.summarize import DailySummaryResponse, StorySchema
+
+log = structlog.get_logger(__name__)
+
+TOP_N_STORIES = 10
+
+
+def _format_articles_block(articles: list[Article], max_chars: int = 12_000) -> str:
+    """Serialize articles into a compact prompt-friendly text block."""
+    lines = []
+    total = 0
+    for i, a in enumerate(articles, 1):
+        snippet = (
+            f"[{i}] {a.title}\n"
+            f"    Source: {a.source_name} | Published: {a.published_at or 'N/A'}\n"
+            f"    URL: {a.url}\n"
+            f"    Coins: {', '.join(a.coins_mentioned or []) or 'General'}\n"
+            f"    Content: {(a.content or '')[:400]}\n\n"
+        )
+        if total + len(snippet) > max_chars:
+            break
+        lines.append(snippet)
+        total += len(snippet)
+    return "".join(lines)
+
+
+async def get_daily_summary(db: AsyncSession) -> DailySummaryResponse:
+    """
+    Generates or returns cached daily digest.
+
+    Flow:
+      1. Check Redis cache (1-hour TTL)
+      2. Fetch today's top articles from PostgreSQL ordered by importance_score
+      3. Run LLM summarization
+      4. Cache and return structured response
+    """
+    # ── 1. Cache check ────────────────────────────────────────────────────────
+    cache_key = key_daily_summary()
+    cached = await cache_get(cache_key)
+    if cached:
+        log.info("daily_summary_cache_hit")
+        return DailySummaryResponse(**cached, cached=True)
+
+    # ── 2. Fetch today's articles ─────────────────────────────────────────────
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.MAX_ARTICLE_AGE_HOURS)
+    result = await db.execute(
+        select(Article)
+        .where(Article.published_at >= cutoff)
+        .where(Article.content.isnot(None))
+        .order_by(Article.importance_score.desc().nulls_last(), Article.published_at.desc())
+        .limit(settings.MAX_ARTICLES_PER_RUN)
+    )
+    articles: list[Article] = list(result.scalars().all())
+
+    if not articles:
+        log.warning("daily_summary_no_articles")
+        return _empty_summary()
+
+    # ── 3. LLM call ───────────────────────────────────────────────────────────
+    articles_block = _format_articles_block(articles)
+    user_prompt = SUMMARIZER_USER_TEMPLATE.format(
+        article_count=len(articles),
+        date=date.today().isoformat(),
+        articles_block=articles_block,
+        top_n=TOP_N_STORIES,
+    )
+
+    result_llm = await chat_completion(
+        system_prompt=SUMMARIZER_SYSTEM,
+        user_prompt=user_prompt,
+        temperature=0.25,
+        max_tokens=2048,
+        response_format="json",
+    )
+    data: dict = result_llm["content"]
+
+    # ── 4. Build structured response ──────────────────────────────────────────
+    top_stories = [
+        StorySchema(
+            headline=s.get("headline", ""),
+            source=s.get("source", ""),
+            url=s.get("url", ""),
+            summary=s.get("summary", ""),
+            sentiment=s.get("sentiment", "neutral"),
+            sentiment_score=float(s.get("sentiment_score", 50)),
+            coins_mentioned=s.get("coins_mentioned", []),
+            importance_score=float(s.get("importance_score", 0.5)),
+        )
+        for s in data.get("top_stories", [])[:TOP_N_STORIES]
+    ]
+
+    # Count unique sources
+    sources_covered = len({a.source_name for a in articles})
+
+    response_data = dict(
+        executive_summary=data.get("executive_summary", ""),
+        top_stories=[s.model_dump() for s in top_stories],
+        key_risk=data.get("key_risk", ""),
+        overall_sentiment=data.get("overall_sentiment", "neutral"),
+        overall_sentiment_score=float(data.get("overall_sentiment_score", 50)),
+        generated_at=datetime.utcnow().isoformat(),
+        prompt_version=SUMMARIZER_VERSION,
+        cached=False,
+        digest_date=date.today().isoformat(),
+        total_articles_analyzed=len(articles),
+        sources_covered=sources_covered,
+    )
+
+    await cache_set(cache_key, response_data, ttl=settings.CACHE_TTL_SUMMARY)
+    log.info("daily_summary_complete", articles=len(articles), stories=len(top_stories))
+
+    return DailySummaryResponse(**response_data)
+
+
+def _empty_summary() -> DailySummaryResponse:
+    """Fallback when no articles are available."""
+    return DailySummaryResponse(
+        executive_summary="No articles ingested yet. Check back after the next news cycle.",
+        top_stories=[],
+        key_risk="Data pipeline may need attention.",
+        overall_sentiment="neutral",
+        overall_sentiment_score=50.0,
+        generated_at=datetime.utcnow().isoformat(),
+        prompt_version=SUMMARIZER_VERSION,
+        cached=False,
+        digest_date=date.today(),
+        total_articles_analyzed=0,
+        sources_covered=0,
+    )
+
+
+# END: app/services/ai/summarizer.py
+# ======================================================================
+
+# FILE: app/services/ai/sentiment.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — PulseCheck™ Sentiment Service
+Retrieves recent coin-specific headlines and runs LLM sentiment scoring.
+"""
+from datetime import datetime, timezone, timedelta
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.redis import cache_get, cache_set, key_sentiment
+from app.models.article import Article
+from app.services.ai.prompts import (
+    SENTIMENT_SYSTEM, SENTIMENT_USER_TEMPLATE, SENTIMENT_VERSION
+)
+from app.services.ai.llm_client import chat_completion
+from app.schemas.sentiment import SentimentResponse, SentimentDriver
+
+log = structlog.get_logger(__name__)
+
+# Coin name lookup (extend as needed; ideally pull from CoinGecko API)
+COIN_NAMES: dict[str, str] = {
+    "BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana",
+    "BNB": "BNB", "XRP": "XRP", "ADA": "Cardano", "AVAX": "Avalanche",
+    "DOT": "Polkadot", "MATIC": "Polygon", "LINK": "Chainlink",
+    "UNI": "Uniswap", "AAVE": "Aave", "ARB": "Arbitrum", "OP": "Optimism",
+    "SUI": "Sui", "APT": "Aptos", "INJ": "Injective", "TIA": "Celestia",
+}
+
+HOURS_WINDOW = 24
+
+
+async def get_sentiment(coin: str, db: AsyncSession) -> SentimentResponse:
+    """
+    Returns the sentiment score for a given coin ticker.
+
+    Flow:
+      1. Check Redis cache (30-min TTL)
+      2. Fetch last 24h headlines from PostgreSQL filtered by coin
+      3. LLM scoring + structured output
+      4. Cache and return
+    """
+    coin = coin.upper().strip()
+    coin_name = COIN_NAMES.get(coin, coin)
+
+    # ── 1. Cache check ────────────────────────────────────────────────────────
+    cache_key = key_sentiment(coin)
+    cached = await cache_get(cache_key)
+    if cached:
+        log.info("sentiment_cache_hit", coin=coin)
+        return SentimentResponse(**cached, cached=True)
+
+    # ── 2. Fetch recent headlines ─────────────────────────────────────────────
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS_WINDOW)
+    result = await db.execute(
+        select(Article.title, Article.url, Article.source_name, Article.published_at)
+        .where(Article.published_at >= cutoff)
+        .where(Article.coins_mentioned.contains([coin]))
+        .order_by(Article.importance_score.desc().nulls_last())
+        .limit(50)
+    )
+    rows = result.all()
+
+    if not rows:
+        return _neutral_sentiment(coin, coin_name)
+
+    headlines_block = "\n".join(
+        f"- [{r.source_name}] {r.title}" for r in rows
+    )
+
+    # ── 3. LLM scoring ────────────────────────────────────────────────────────
+    user_prompt = SENTIMENT_USER_TEMPLATE.format(
+        coin_name=coin_name,
+        coin_symbol=coin,
+        hours=HOURS_WINDOW,
+        headlines_block=headlines_block,
+    )
+
+    result_llm = await chat_completion(
+        system_prompt=SENTIMENT_SYSTEM,
+        user_prompt=user_prompt,
+        temperature=0.1,
+        max_tokens=512,
+        response_format="json",
+    )
+    data: dict = result_llm["content"]
+
+    # ── 4. Build response & cache ─────────────────────────────────────────────
+    drivers = [
+        SentimentDriver(driver=d.get("driver", ""), impact=d.get("impact", "neutral"))
+        for d in data.get("key_drivers", [])
+    ]
+
+    response_data = dict(
+        coin=coin,
+        coin_name=coin_name,
+        score=float(data.get("score", 50)),
+        label=data.get("label", "Neutral"),
+        label_emoji=data.get("label_emoji", "😐"),
+        key_drivers=[d.model_dump() for d in drivers],
+        headline_sample=data.get("headline_sample", [])[:3],
+        articles_analyzed=int(data.get("articles_analyzed", len(rows))),
+        time_window_hours=HOURS_WINDOW,
+        generated_at=datetime.utcnow().isoformat(),
+        prompt_version=SENTIMENT_VERSION,
+        cached=False,
+    )
+
+    await cache_set(cache_key, response_data, ttl=settings.CACHE_TTL_SENTIMENT)
+    log.info("sentiment_complete", coin=coin, score=response_data["score"])
+    return SentimentResponse(**response_data)
+
+
+def _neutral_sentiment(coin: str, coin_name: str) -> SentimentResponse:
+    """Fallback when no headlines are found."""
+    return SentimentResponse(
+        coin=coin, coin_name=coin_name,
+        score=50.0, label="Neutral", label_emoji="😐",
+        key_drivers=[], headline_sample=[],
+        articles_analyzed=0, time_window_hours=HOURS_WINDOW,
+        generated_at=datetime.utcnow().isoformat(),
+        prompt_version=SENTIMENT_VERSION, cached=False,
+    )
+
+
+# END: app/services/ai/sentiment.py
+# ======================================================================
+
+# FILE: app/services/ai/whitepaper.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — DeepRead™ Whitepaper Analyzer Service
+Downloads/scrapes a whitepaper URL, chunks the text,
+retrieves relevant context via RAG, and runs LLM analysis.
+"""
+from datetime import datetime
+import hashlib
+import structlog
+import httpx
+from bs4 import BeautifulSoup
+
+from app.services.ai.prompts import (
+    WHITEPAPER_SYSTEM, WHITEPAPER_USER_TEMPLATE, WHITEPAPER_VERSION
+)
+from app.services.ai.llm_client import chat_completion
+from app.schemas.whitepaper import WhitepaperRequest, WhitepaperResponse, RiskFactor
+
+log = structlog.get_logger(__name__)
+
+MAX_CONTENT_CHARS = 20_000   # ~5,000 tokens — enough for a whitepaper summary
+CHUNK_SIZE = 4_000
+
+
+async def _fetch_whitepaper_text(url: str) -> tuple[str, int]:
+    """
+    Fetch whitepaper content from a URL.
+    Handles HTML pages and plain-text PDFs.
+    Returns (text, page_count_estimate).
+    """
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        resp = await client.get(url, headers={"User-Agent": "CryptoSage-Bot/1.0"})
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+
+        if "pdf" in content_type:
+            # For PDFs, extract text via pypdf (optional dep)
+            try:
+                import io
+                from pypdf import PdfReader
+                reader = PdfReader(io.BytesIO(resp.content))
+                pages = [p.extract_text() or "" for p in reader.pages]
+                return "\n\n".join(pages)[:MAX_CONTENT_CHARS], len(pages)
+            except ImportError:
+                log.warning("pypdf_not_installed_falling_back_to_text")
+                return resp.text[:MAX_CONTENT_CHARS], 0
+
+        # HTML — extract readable text
+        soup = BeautifulSoup(resp.text, "lxml")
+        for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        # Rough page estimate: ~400 words per page
+        word_count = len(text.split())
+        pages = max(1, word_count // 400)
+        return text[:MAX_CONTENT_CHARS], pages
+
+
+def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> list[str]:
+    """Split text into overlapping chunks for prompt injection."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append(text[start:end])
+        start += chunk_size - 500   # 500-char overlap
+    return chunks
+
+
+def _format_chunks(chunks: list[str]) -> str:
+    """Format chunks as numbered sections for the prompt."""
+    return "\n\n".join(f"--- Section {i+1} ---\n{c}" for i, c in enumerate(chunks[:5]))
+
+
+async def analyze_whitepaper(
+    request: WhitepaperRequest,
+    user_id: str,
+) -> WhitepaperResponse:
+    """
+    Main whitepaper analysis pipeline.
+
+    Flow:
+      1. Fetch content from URL
+      2. Chunk into sections
+      3. LLM analysis with structured output
+      4. Return WhitepaperResponse
+    """
+    # ── 1. Fetch ──────────────────────────────────────────────────────────────
+    try:
+        text, pages = await _fetch_whitepaper_text(request.url)
+    except httpx.HTTPError as exc:
+        raise ValueError(f"Could not fetch whitepaper: {exc}") from exc
+
+    if len(text.strip()) < 200:
+        raise ValueError("Whitepaper content too short or inaccessible.")
+
+    project_name = request.project_name or "Unknown Project"
+
+    # ── 2. Chunk ──────────────────────────────────────────────────────────────
+    chunks = _chunk_text(text)
+    doc_block = _format_chunks(chunks)
+
+    # ── 3. LLM analysis ───────────────────────────────────────────────────────
+    user_prompt = WHITEPAPER_USER_TEMPLATE.format(
+        project_name=project_name,
+        source_url=request.url,
+        document_chunks=doc_block,
+    )
+
+    result = await chat_completion(
+        system_prompt=WHITEPAPER_SYSTEM,
+        user_prompt=user_prompt,
+        temperature=0.2,
+        max_tokens=2048,
+        response_format="json",
+    )
+    data: dict = result["content"]
+
+    # ── 4. Build response ─────────────────────────────────────────────────────
+    risk_factors = [
+        RiskFactor(
+            factor=r.get("factor", ""),
+            severity=r.get("severity", "medium"),
+        )
+        for r in data.get("risk_factors", [])[:5]
+    ]
+
+    log.info(
+        "whitepaper_complete",
+        project=project_name,
+        impression=data.get("overall_impression"),
+        user=user_id,
+        latency_ms=result["latency_ms"],
+    )
+
+    return WhitepaperResponse(
+        project_name=data.get("project_name") or project_name,
+        one_liner=data.get("one_liner", ""),
+        token_utility=data.get("token_utility", ""),
+        team_signals=data.get("team_signals", ""),
+        tech_differentiation=data.get("tech_differentiation", ""),
+        risk_factors=risk_factors,
+        overall_impression=data.get("overall_impression", "Moderate"),
+        overall_impression_emoji=data.get("overall_impression_emoji", "🔍"),
+        disclaimer="This is not investment advice. Factual analysis only.",
+        source_url=request.url,
+        pages_analyzed=pages or None,
+        prompt_version=WHITEPAPER_VERSION,
+        generated_at=datetime.utcnow().isoformat(),
+    )
+
+
+# END: app/services/ai/whitepaper.py
+# ======================================================================

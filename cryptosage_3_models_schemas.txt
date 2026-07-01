@@ -1,0 +1,582 @@
+# CryptoSage AI — Bundle: 3_models_schemas
+# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =
+
+# FILE: app/models/user.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — User ORM Model
+Stores Clerk-authenticated users with plan tier and subscription metadata.
+"""
+import uuid
+from datetime import datetime
+from enum import Enum as PyEnum
+from sqlalchemy import String, Boolean, DateTime, Enum, Integer, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+
+class PlanTier(str, PyEnum):
+    FREE = "free"
+    PRO = "pro"
+    ENTERPRISE = "enterprise"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # Clerk's external user ID — used to verify JWT claims
+    clerk_user_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # Plan & billing
+    plan: Mapped[PlanTier] = mapped_column(
+        Enum(PlanTier), default=PlanTier.FREE, nullable=False, index=True
+    )
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Preferences
+    email_digest_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    digest_frequency: Mapped[str] = mapped_column(String(16), default="daily")  # daily | weekly
+    preferred_mode: Mapped[str] = mapped_column(String(16), default="simple")   # simple | pro
+
+    # API access
+    api_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
+    api_calls_this_month: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Meta
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    # Relationships
+    watchlist: Mapped[list["WatchlistItem"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    usage_logs: Mapped[list["UsageLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def is_pro(self) -> bool:
+        return self.plan in (PlanTier.PRO, PlanTier.ENTERPRISE)
+
+    @property
+    def is_enterprise(self) -> bool:
+        return self.plan == PlanTier.ENTERPRISE
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id} email={self.email} plan={self.plan}>"
+
+
+# END: app/models/user.py
+# ======================================================================
+
+# FILE: app/models/article.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Article ORM Model
+Stores ingested and normalised news articles with embeddings metadata.
+"""
+import uuid
+from datetime import datetime
+from sqlalchemy import String, Text, Boolean, DateTime, Float, Integer, Index, func, ARRAY
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+from app.core.database import Base
+
+
+class Article(Base):
+    __tablename__ = "articles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Content
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), unique=True, nullable=False, index=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)      # AI-generated
+    source_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    author: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    # Classification
+    coins_mentioned: Mapped[list[str]] = mapped_column(ARRAY(String), default=list, index=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)   # defi | nft | regulation | macro | altcoin | bitcoin
+    sentiment: Mapped[str | None] = mapped_column(String(16), nullable=True)  # bullish | bearish | neutral
+    sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-100
+    importance_score: Mapped[float | None] = mapped_column(Float, nullable=True) # 0-1 relevance signal
+
+    # Deduplication
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+
+    # Vector DB
+    pinecone_id: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    is_embedded: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    # Timestamps
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __table_args__ = (
+        Index("ix_articles_coins_gin", "coins_mentioned", postgresql_using="gin"),
+        Index("ix_articles_published_source", "published_at", "source_name"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Article id={self.id} title={self.title[:40]}...>"
+
+
+# END: app/models/article.py
+# ======================================================================
+
+# FILE: app/models/watchlist.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Watchlist ORM Model
+Per-user coin watchlist with notification preferences.
+"""
+import uuid
+from datetime import datetime
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, func, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+
+class WatchlistItem(Base):
+    __tablename__ = "watchlist_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    coin_symbol: Mapped[str] = mapped_column(String(16), nullable=False)   # e.g. BTC, ETH, SOL
+    coin_name: Mapped[str] = mapped_column(String(64), nullable=False)     # e.g. Bitcoin
+    coingecko_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # for price API
+
+    # Notification settings per coin
+    alert_on_major_news: Mapped[bool] = mapped_column(Boolean, default=True)
+    alert_on_sentiment_shift: Mapped[bool] = mapped_column(Boolean, default=False)
+    include_in_digest: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Sort order in UI
+    sort_order: Mapped[int] = mapped_column(default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="watchlist")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "coin_symbol", name="uq_watchlist_user_coin"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WatchlistItem user={self.user_id} coin={self.coin_symbol}>"
+
+
+# END: app/models/watchlist.py
+# ======================================================================
+
+# FILE: app/models/usage.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Usage Log ORM Model
+Tracks per-user AI feature consumption for billing and analytics.
+"""
+import uuid
+from datetime import datetime
+from sqlalchemy import String, DateTime, Float, ForeignKey, func, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+
+
+class UsageLog(Base):
+    __tablename__ = "usage_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # Feature identifier
+    feature: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # e.g. "explain" | "summarize" | "sentiment" | "whitepaper" | "api"
+
+    # Request metadata
+    input_tokens: Mapped[int | None] = mapped_column(default=None)
+    output_tokens: Mapped[int | None] = mapped_column(default=None)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_used: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # Extra context (query term, coin, etc.)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    user: Mapped["User"] = relationship(back_populates="usage_logs")
+
+    __table_args__ = (
+        Index("ix_usage_user_feature_date", "user_id", "feature", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UsageLog user={self.user_id} feature={self.feature}>"
+
+
+# END: app/models/usage.py
+# ======================================================================
+
+# FILE: app/models/prompt.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Prompt Version ORM Model
+Tracks versioned prompts for A/B testing and rollback.
+"""
+import uuid
+from datetime import datetime
+from sqlalchemy import String, Text, Boolean, DateTime, Float, Integer, func, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+from app.core.database import Base
+
+
+class PromptVersion(Base):
+    __tablename__ = "prompt_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Identification
+    feature: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # e.g. "explain" | "summarize" | "sentiment" | "whitepaper"
+    version: Mapped[str] = mapped_column(String(16), nullable=False)
+    # e.g. "v1.0", "v1.1", "v2.0"
+
+    # Prompt content
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    user_prompt_template: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Config
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    temperature: Mapped[float] = mapped_column(Float, default=0.3)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=1024)
+
+    # A/B testing
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    traffic_pct: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
+
+    # Performance metrics (updated by background job)
+    avg_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_user_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_calls: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Extra config (guardrail settings, output schema, etc.)
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("feature", "version", name="uq_prompt_feature_version"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PromptVersion feature={self.feature} version={self.version} active={self.is_active}>"
+
+
+# END: app/models/prompt.py
+# ======================================================================
+
+# FILE: app/schemas/explain.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Explain Endpoint Schemas
+"""
+from pydantic import BaseModel, Field
+
+
+class ExplainRequest(BaseModel):
+    query: str = Field(..., min_length=2, max_length=500, description="Crypto term or concept to explain")
+    mode: str = Field("simple", pattern="^(simple|pro)$", description="Response depth: simple | pro")
+    coin_context: str | None = Field(None, description="Optional coin ticker for context (e.g. ETH)")
+
+    model_config = {"json_schema_extra": {"example": {"query": "What is liquid staking?", "mode": "simple", "coin_context": "ETH"}}}
+
+
+class ExplainResponse(BaseModel):
+    query: str
+    simple: str = Field(..., description="One-sentence plain-English answer")
+    analogy: str = Field(..., description="Real-world analogy for the concept")
+    why_it_matters: str = Field(..., description="Why this matters to investors")
+    deep_dive: str | None = Field(None, description="Extended technical explanation (pro mode only)")
+    related_terms: list[str] = Field(default_factory=list, description="3-5 related concepts to explore")
+    sources: list[str] = Field(default_factory=list, description="URLs of reference articles used")
+    prompt_version: str = Field(..., description="Prompt version used for this response")
+    cached: bool = Field(False, description="Whether this response was served from cache")
+
+
+# END: app/schemas/explain.py
+# ======================================================================
+
+# FILE: app/schemas/summarize.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Summarize Endpoint Schemas
+"""
+from datetime import date
+from pydantic import BaseModel, Field
+
+
+class StorySchema(BaseModel):
+    headline: str
+    source: str
+    url: str
+    summary: str = Field(..., description="2-sentence AI summary")
+    sentiment: str = Field(..., pattern="^(bullish|bearish|neutral)$")
+    sentiment_score: float = Field(..., ge=0, le=100)
+    coins_mentioned: list[str] = Field(default_factory=list)
+    importance_score: float = Field(..., ge=0, le=1)
+
+
+class SummarizeResponse(BaseModel):
+    executive_summary: str = Field(..., description="3-sentence overview of today's crypto landscape")
+    top_stories: list[StorySchema]
+    key_risk: str = Field(..., description="One key risk to watch today")
+    overall_sentiment: str = Field(..., pattern="^(bullish|bearish|neutral)$")
+    overall_sentiment_score: float = Field(..., ge=0, le=100)
+    generated_at: str
+    prompt_version: str
+    cached: bool = False
+
+
+class DailySummaryResponse(SummarizeResponse):
+    digest_date: date
+    total_articles_analyzed: int
+    sources_covered: int
+
+
+# END: app/schemas/summarize.py
+# ======================================================================
+
+# FILE: app/schemas/sentiment.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Sentiment Endpoint Schemas
+"""
+from pydantic import BaseModel, Field
+
+
+class SentimentRequest(BaseModel):
+    coin: str = Field(..., min_length=1, max_length=16, description="Coin ticker symbol (e.g. BTC, ETH, SOL)")
+
+    model_config = {"json_schema_extra": {"example": {"coin": "ETH"}}}
+
+
+class SentimentDriver(BaseModel):
+    driver: str = Field(..., description="Key reason behind the sentiment")
+    impact: str = Field(..., pattern="^(positive|negative|neutral)$")
+
+
+class SentimentResponse(BaseModel):
+    coin: str
+    coin_name: str
+    score: float = Field(..., ge=0, le=100, description="0=extremely bearish, 100=extremely bullish")
+    label: str = Field(..., description="Bearish | Neutral | Bullish | Very Bullish")
+    label_emoji: str
+    key_drivers: list[SentimentDriver]
+    headline_sample: list[str] = Field(default_factory=list, description="Top 3 headlines that drove the score")
+    articles_analyzed: int
+    time_window_hours: int = 24
+    generated_at: str
+    prompt_version: str
+    cached: bool = False
+
+
+# END: app/schemas/sentiment.py
+# ======================================================================
+
+# FILE: app/schemas/whitepaper.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Whitepaper Analyzer Schemas
+"""
+from pydantic import BaseModel, Field, HttpUrl
+
+
+class WhitepaperRequest(BaseModel):
+    url: str = Field(..., description="Public URL of the whitepaper (PDF or web page)")
+    project_name: str | None = Field(None, description="Optional project name for context")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "url": "https://ethereum.org/en/whitepaper/",
+                "project_name": "Ethereum",
+            }
+        }
+    }
+
+
+class RiskFactor(BaseModel):
+    factor: str
+    severity: str = Field(..., pattern="^(low|medium|high)$")
+
+
+class WhitepaperResponse(BaseModel):
+    project_name: str
+    one_liner: str = Field(..., description="What the project does in one sentence")
+    token_utility: str = Field(..., description="Plain-English token economics summary")
+    team_signals: str = Field(..., description="Team credibility and transparency assessment")
+    tech_differentiation: str = Field(..., description="What makes the tech unique")
+    risk_factors: list[RiskFactor] = Field(default_factory=list, max_length=5)
+    overall_impression: str = Field(..., pattern="^(Strong|Moderate|Weak)$")
+    overall_impression_emoji: str
+    disclaimer: str = "This is not investment advice. Factual analysis only."
+    source_url: str
+    pages_analyzed: int | None = None
+    prompt_version: str
+    generated_at: str
+
+
+# END: app/schemas/whitepaper.py
+# ======================================================================
+
+# FILE: app/schemas/feed.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Feed & Article Schemas
+"""
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class ArticleSchema(BaseModel):
+    id: str
+    title: str
+    url: str
+    source_name: str
+    summary: str | None = None
+    coins_mentioned: list[str] = Field(default_factory=list)
+    sentiment: str | None = None
+    sentiment_score: float | None = None
+    importance_score: float | None = None
+    published_at: datetime | None = None
+    image_url: str | None = None
+
+
+class FeedResponse(BaseModel):
+    coin: str | None = None
+    articles: list[ArticleSchema]
+    page: int = 1
+    page_size: int = 20
+    total: int
+    has_next: bool
+
+
+# END: app/schemas/feed.py
+# ======================================================================
+
+# FILE: app/schemas/watchlist.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Watchlist Schemas
+"""
+from datetime import datetime
+import uuid
+from pydantic import BaseModel, Field
+
+
+class WatchlistCreate(BaseModel):
+    coin_symbol: str = Field(..., min_length=1, max_length=16)
+    coin_name: str = Field(..., min_length=1, max_length=64)
+    coingecko_id: str | None = None
+    alert_on_major_news: bool = True
+    alert_on_sentiment_shift: bool = False
+    include_in_digest: bool = True
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "coin_symbol": "SOL",
+                "coin_name": "Solana",
+                "coingecko_id": "solana",
+                "alert_on_major_news": True,
+            }
+        }
+    }
+
+
+class WatchlistResponse(BaseModel):
+    id: uuid.UUID
+    coin_symbol: str
+    coin_name: str
+    coingecko_id: str | None
+    alert_on_major_news: bool
+    alert_on_sentiment_shift: bool
+    include_in_digest: bool
+    sort_order: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# END: app/schemas/watchlist.py
+# ======================================================================
+
+# FILE: app/schemas/user.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — User Schemas
+"""
+import uuid
+from datetime import datetime
+from pydantic import BaseModel, EmailStr, Field
+from app.models.user import PlanTier
+
+
+class UserSchema(BaseModel):
+    id: uuid.UUID
+    email: str
+    full_name: str | None
+    avatar_url: str | None
+    plan: PlanTier
+    email_digest_enabled: bool
+    digest_frequency: str
+    preferred_mode: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserPlanSchema(BaseModel):
+    plan: PlanTier
+    stripe_customer_id: str | None
+    stripe_subscription_id: str | None
+    plan_expires_at: datetime | None
+    api_key: str | None
+    api_calls_this_month: int
+
+    model_config = {"from_attributes": True}
+
+
+class UserUpdateRequest(BaseModel):
+    full_name: str | None = Field(None, max_length=255)
+    email_digest_enabled: bool | None = None
+    digest_frequency: str | None = Field(None, pattern="^(daily|weekly)$")
+    preferred_mode: str | None = Field(None, pattern="^(simple|pro)$")
+
+
+# END: app/schemas/user.py
+# ======================================================================

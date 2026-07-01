@@ -1,0 +1,850 @@
+# CryptoSage AI — Bundle: 5_ingestion_tasks
+# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =# =
+
+# FILE: app/services/ingestion/ingestor.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — News Ingestion Pipeline
+Crawls RSS feeds + web pages, normalises articles, deduplicates,
+and enqueues them for embedding into Pinecone.
+"""
+import asyncio
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import aiohttp
+import feedparser
+import structlog
+from bs4 import BeautifulSoup
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.database import AsyncSessionLocal
+from app.models.article import Article
+from app.services.ingestion.coin_tagger import tag_coins
+from app.services.ingestion.importance_scorer import score_importance
+
+log = structlog.get_logger(__name__)
+
+# ── Load source config ────────────────────────────────────────────────────────
+def load_sources() -> list[dict]:
+    config_path = Path(settings.NEWS_SOURCES_CONFIG_PATH)
+    if not config_path.exists():
+        log.warning("sources_config_not_found", path=str(config_path))
+        return _default_sources()
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def _default_sources() -> list[dict]:
+    return [
+        {"name": "CoinDesk",         "url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "type": "rss"},
+        {"name": "Decrypt",          "url": "https://decrypt.co/feed",                          "type": "rss"},
+        {"name": "The Block",        "url": "https://www.theblock.co/rss.xml",                  "type": "rss"},
+        {"name": "CryptoSlate",      "url": "https://cryptoslate.com/feed/",                    "type": "rss"},
+        {"name": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/.rss/full/",            "type": "rss"},
+        {"name": "Cointelegraph",    "url": "https://cointelegraph.com/rss",                     "type": "rss"},
+        {"name": "BeInCrypto",       "url": "https://beincrypto.com/feed/",                     "type": "rss"},
+        {"name": "DL News",          "url": "https://www.dlnews.com/arc/outboundfeeds/rss/",    "type": "rss"},
+    ]
+
+
+# ── Article Fetcher ───────────────────────────────────────────────────────────
+async def fetch_rss_feed(source: dict, session: aiohttp.ClientSession) -> list[dict[str, Any]]:
+    """Parse an RSS feed and return a list of raw article dicts."""
+    articles = []
+    try:
+        async with session.get(source["url"], timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            text = await resp.text()
+        feed = feedparser.parse(text)
+        for entry in feed.entries[:30]:  # cap per source
+            published = None
+            if hasattr(entry, "published_parsed") and entry.published_parsed:
+                published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+
+            content = ""
+            if hasattr(entry, "content"):
+                content = entry.content[0].get("value", "")
+            elif hasattr(entry, "summary"):
+                content = entry.summary
+
+            # Strip HTML tags from content
+            soup = BeautifulSoup(content, "html.parser")
+            content_clean = soup.get_text(separator=" ", strip=True)
+
+            articles.append({
+                "title":       getattr(entry, "title", "").strip(),
+                "url":         getattr(entry, "link", ""),
+                "content":     content_clean[:8000],
+                "source_name": source["name"],
+                "author":      getattr(entry, "author", None),
+                "image_url":   _extract_image(entry),
+                "published_at": published,
+            })
+    except Exception as exc:
+        log.warning("rss_fetch_error", source=source["name"], error=str(exc))
+    return articles
+
+
+def _extract_image(entry) -> str | None:
+    """Try to extract a thumbnail/image URL from a feed entry."""
+    if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get("url")
+    if hasattr(entry, "enclosures") and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get("type", "").startswith("image/"):
+                return enc.get("href")
+    return None
+
+
+# ── Content Hash ──────────────────────────────────────────────────────────────
+def compute_hash(title: str, url: str) -> str:
+    return hashlib.sha256(f"{title.lower().strip()}|{url.strip()}".encode()).hexdigest()[:32]
+
+
+# ── Ingestion Pipeline ────────────────────────────────────────────────────────
+async def ingest_all_sources() -> dict[str, int]:
+    """
+    Main ingestion entry point. Run by the Celery beat scheduler.
+    Returns stats: {fetched, new, skipped, errors}.
+    """
+    sources = load_sources()
+    stats = {"fetched": 0, "new": 0, "skipped": 0, "errors": 0}
+
+    connector = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(
+        connector=connector,
+        headers={"User-Agent": "CryptoSage-Bot/1.0 (https://cryptosage.ai)"},
+    ) as http_session:
+
+        # Fetch all feeds concurrently
+        tasks = [fetch_rss_feed(src, http_session) for src in sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_articles: list[dict] = []
+    for result in results:
+        if isinstance(result, list):
+            all_articles.extend(result)
+        else:
+            stats["errors"] += 1
+
+    stats["fetched"] = len(all_articles)
+    log.info("ingestion_fetched", count=len(all_articles), sources=len(sources))
+
+    # Process & store
+    async with AsyncSessionLocal() as db:
+        for raw in all_articles[:settings.MAX_ARTICLES_PER_RUN]:
+            try:
+                saved = await _process_and_save(raw, db)
+                if saved:
+                    stats["new"] += 1
+                else:
+                    stats["skipped"] += 1
+            except Exception as exc:
+                log.warning("article_save_error", error=str(exc), title=raw.get("title", "")[:60])
+                stats["errors"] += 1
+        await db.commit()
+
+    log.info("ingestion_complete", **stats)
+    return stats
+
+
+async def _process_and_save(raw: dict, db: AsyncSession) -> bool:
+    """
+    Normalise, deduplicate, tag, score, and persist one article.
+    Returns True if newly saved, False if duplicate.
+    """
+    title = raw.get("title", "").strip()
+    url   = raw.get("url", "").strip()
+    if not title or not url:
+        return False
+
+    content_hash = compute_hash(title, url)
+
+    # Deduplication check
+    existing = await db.execute(
+        select(Article.id).where(Article.content_hash == content_hash)
+    )
+    if existing.scalar_one_or_none() is not None:
+        return False   # duplicate
+
+    # Coin tagging
+    content_text = f"{title} {raw.get('content', '')}"
+    coins_mentioned = tag_coins(content_text)
+
+    # Importance score
+    importance = score_importance(title, raw.get("content", ""), coins_mentioned)
+
+    article = Article(
+        title=title,
+        url=url,
+        content=raw.get("content"),
+        source_name=raw.get("source_name", "Unknown"),
+        author=raw.get("author"),
+        image_url=raw.get("image_url"),
+        coins_mentioned=coins_mentioned,
+        content_hash=content_hash,
+        importance_score=importance,
+        published_at=raw.get("published_at"),
+    )
+    db.add(article)
+    return True
+
+
+# END: app/services/ingestion/ingestor.py
+# ======================================================================
+
+# FILE: app/services/ingestion/coin_tagger.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Coin Tagger
+Regex-based coin mention extraction from article text.
+Fast, zero-latency, no API calls required.
+"""
+import re
+
+# ── Coin Ticker Registry ──────────────────────────────────────────────────────
+# Format: SYMBOL -> [alias patterns] (case-insensitive matching)
+COIN_REGISTRY: dict[str, list[str]] = {
+    "BTC":  ["bitcoin", r"\bbtc\b"],
+    "ETH":  ["ethereum", r"\beth\b"],
+    "SOL":  ["solana", r"\bsol\b"],
+    "BNB":  [r"\bbnb\b", "binance coin", "binance smart chain", r"\bbsc\b"],
+    "XRP":  [r"\bxrp\b", "ripple"],
+    "ADA":  ["cardano", r"\bada\b"],
+    "AVAX": ["avalanche", r"\bavax\b"],
+    "DOT":  ["polkadot", r"\bdot\b"],
+    "MATIC":["polygon", r"\bmatic\b"],
+    "LINK": ["chainlink", r"\blink\b"],
+    "UNI":  ["uniswap", r"\buni\b"],
+    "AAVE": [r"\baave\b"],
+    "ARB":  ["arbitrum", r"\barb\b"],
+    "OP":   ["optimism", r"\bop\b"],
+    "SUI":  [r"\bsui\b"],
+    "APT":  ["aptos", r"\bapt\b"],
+    "INJ":  ["injective", r"\binj\b"],
+    "TIA":  ["celestia", r"\btia\b"],
+    "LTC":  ["litecoin", r"\bltc\b"],
+    "BCH":  ["bitcoin cash", r"\bbch\b"],
+    "ATOM": ["cosmos", r"\batom\b"],
+    "NEAR": [r"\bnear\b", "near protocol"],
+    "FIL":  ["filecoin", r"\bfil\b"],
+    "ICP":  ["internet computer", r"\bicp\b"],
+    "DOGE": ["dogecoin", r"\bdoge\b"],
+    "SHIB": ["shiba inu", r"\bshib\b"],
+    "MKR":  ["makerdao", r"\bmkr\b"],
+    "CRV":  ["curve", r"\bcrv\b"],
+    "COMP": ["compound", r"\bcomp\b"],
+    "SUSHI":["sushiswap", r"\bsushi\b"],
+    "SNX":  ["synthetix", r"\bsnx\b"],
+    "GRT":  ["the graph", r"\bgrt\b"],
+    "LDO":  ["lido", r"\bldo\b"],
+    "RPL":  ["rocket pool", r"\brpl\b"],
+    "RETH": [r"\breth\b"],
+    "STETH":[r"\bsteth\b"],
+    "WBTC": ["wrapped bitcoin", r"\bwbtc\b"],
+    "USDC": [r"\busdc\b", "usd coin"],
+    "USDT": [r"\busdt\b", "tether"],
+    "DAI":  [r"\bdai\b"],
+}
+
+# Pre-compile patterns for performance
+_COMPILED: dict[str, list[re.Pattern]] = {
+    symbol: [re.compile(p, re.IGNORECASE) for p in patterns]
+    for symbol, patterns in COIN_REGISTRY.items()
+}
+
+
+def tag_coins(text: str, max_coins: int = 10) -> list[str]:
+    """
+    Extract coin ticker symbols mentioned in `text`.
+    Returns a deduplicated list of uppercase ticker strings, ordered by first appearance.
+
+    Args:
+        text:      Article title + body text (concatenated)
+        max_coins: Maximum number of coins to return (prevents spam articles)
+    """
+    if not text:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    for symbol, patterns in _COMPILED.items():
+        for pattern in patterns:
+            if pattern.search(text):
+                if symbol not in seen:
+                    found.append(symbol)
+                    seen.add(symbol)
+                break  # found for this symbol, move on
+
+        if len(found) >= max_coins:
+            break
+
+    return found
+
+
+def is_crypto_related(text: str) -> bool:
+    """
+    Quick heuristic to check if an article is crypto-related.
+    Used to filter out false positives from general finance feeds.
+    """
+    CRYPTO_KEYWORDS = [
+        "crypto", "blockchain", "defi", "nft", "token", "wallet",
+        "ethereum", "bitcoin", "solana", "web3", "smart contract",
+        "exchange", "coinbase", "binance", "altcoin", "stablecoin",
+        "mining", "staking", "yield", "dao", "layer 2", "layer2",
+        "on-chain", "dex", "cex", "whitepaper", "tokenomics",
+    ]
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in CRYPTO_KEYWORDS)
+
+
+# END: app/services/ingestion/coin_tagger.py
+# ======================================================================
+
+# FILE: app/services/ingestion/importance_scorer.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Importance Scorer
+Heuristic-based article importance scoring (0.0–1.0).
+Fast, deterministic, no LLM calls. Used at ingestion time.
+"""
+import re
+
+# ── Signal Weights ────────────────────────────────────────────────────────────
+# Each matched keyword adds its weight to the raw score (capped at 1.0)
+
+HIGH_IMPACT_TERMS = {
+    # Regulatory / legal
+    "sec": 0.25, "cftc": 0.25, "regulation": 0.20, "ban": 0.20, "law": 0.15,
+    "lawsuit": 0.20, "court": 0.15, "congress": 0.20, "senate": 0.18,
+    "doj": 0.25, "arrest": 0.25, "fraud": 0.22, "sanction": 0.22,
+    # Market events
+    "etf": 0.20, "ipo": 0.18, "listing": 0.15, "delisting": 0.22,
+    "hack": 0.30, "exploit": 0.30, "breach": 0.28, "stolen": 0.28,
+    "bankruptcy": 0.30, "insolvency": 0.28, "collapse": 0.28, "rug pull": 0.30,
+    "partnership": 0.10, "acquisition": 0.18, "merger": 0.18,
+    "billion": 0.10, "million": 0.06,
+    # Major institutions
+    "blackrock": 0.20, "fidelity": 0.18, "jp morgan": 0.18, "goldman": 0.18,
+    "coinbase": 0.12, "binance": 0.12, "federal reserve": 0.18, "fed": 0.10,
+    # Protocol events
+    "upgrade": 0.12, "fork": 0.15, "mainnet": 0.12, "launch": 0.08,
+    "halving": 0.20, "merge": 0.15,
+    # Price action
+    "all-time high": 0.18, "ath": 0.18, "crash": 0.22, "rally": 0.10,
+    "liquidation": 0.18, "flash crash": 0.25,
+}
+
+TIER1_COINS = {"BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX"}
+TIER2_COINS = {"DOT", "MATIC", "LINK", "UNI", "ARB", "OP", "NEAR", "ATOM"}
+
+TRUSTED_SOURCES = {
+    "coindesk", "the block", "decrypt", "cointelegraph",
+    "bitcoin magazine", "cryptoslate", "reuters", "bloomberg",
+    "financial times", "wall street journal",
+}
+
+
+def score_importance(
+    title: str,
+    content: str,
+    coins_mentioned: list[str],
+    source_name: str = "",
+) -> float:
+    """
+    Compute an importance score for an article (0.0–1.0).
+
+    Factors:
+      - High-impact keyword matches in title (weighted 2x) and content
+      - Tier of coins mentioned
+      - Source credibility
+      - Article length (proxy for depth)
+
+    Returns:
+        float in [0.0, 1.0]
+    """
+    score = 0.0
+    title_lower   = title.lower()
+    content_lower = (content or "").lower()
+
+    # ── Keyword scoring ───────────────────────────────────────────────────────
+    for term, weight in HIGH_IMPACT_TERMS.items():
+        in_title   = term in title_lower
+        in_content = term in content_lower
+        if in_title:
+            score += weight * 2.0   # title match is 2× more significant
+        elif in_content:
+            score += weight * 0.5
+
+    # ── Coin tier bonus ───────────────────────────────────────────────────────
+    if any(c in TIER1_COINS for c in coins_mentioned):
+        score += 0.10
+    elif any(c in TIER2_COINS for c in coins_mentioned):
+        score += 0.05
+
+    # Multiple coins → broader market relevance
+    if len(coins_mentioned) >= 4:
+        score += 0.05
+
+    # ── Source credibility bonus ──────────────────────────────────────────────
+    source_lower = source_name.lower()
+    if any(ts in source_lower for ts in TRUSTED_SOURCES):
+        score += 0.05
+
+    # ── Length signal ─────────────────────────────────────────────────────────
+    word_count = len((content or "").split())
+    if word_count > 800:
+        score += 0.05
+    elif word_count > 300:
+        score += 0.02
+
+    # ── Clamp to [0.0, 1.0] ───────────────────────────────────────────────────
+    return round(min(score, 1.0), 4)
+
+
+# END: app/services/ingestion/importance_scorer.py
+# ======================================================================
+
+# FILE: app/services/digest/email_sender.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Morning Brief™ Email Sender
+Uses Resend to deliver personalized daily digest emails.
+"""
+from datetime import date
+import structlog
+import resend
+
+from app.core.config import settings
+from app.models.user import User
+from app.schemas.summarize import DailySummaryResponse
+
+log = structlog.get_logger(__name__)
+
+resend.api_key = settings.RESEND_API_KEY
+
+# ── Sentiment emoji helper ────────────────────────────────────────────────────
+SENTIMENT_EMOJI = {
+    "bullish":  "📈",
+    "bearish":  "📉",
+    "neutral":  "➡️",
+}
+
+
+def _build_html(user: User, summary: DailySummaryResponse) -> str:
+    """Render the Morning Brief HTML email template."""
+    stories_html = ""
+    for i, story in enumerate(summary.top_stories[:5], 1):
+        emoji = SENTIMENT_EMOJI.get(story.sentiment, "➡️")
+        stories_html += f"""
+        <tr>
+          <td style="padding:12px 0;border-bottom:1px solid #1e2a38;">
+            <a href="{story.url}" style="color:#00d4aa;font-weight:600;font-size:14px;text-decoration:none;">
+              {i}. {story.headline}
+            </a><br>
+            <span style="color:#8b949e;font-size:12px;">{story.source} &nbsp;|&nbsp; {emoji} {story.sentiment.title()}</span><br>
+            <span style="color:#c9d1d9;font-size:13px;line-height:1.5;">{story.summary}</span>
+          </td>
+        </tr>"""
+
+    coins_html = ""
+    if user.watchlist:
+        coins = [w.coin_symbol for w in user.watchlist[:6]]
+        coins_html = " &nbsp;·&nbsp; ".join(
+            [f'<a href="https://cryptosage.ai/feed/{c}" style="color:#f0b429;">{c}</a>' for c in coins]
+        )
+        coins_html = f'<p style="margin:16px 0 0;font-size:12px;color:#8b949e;">Your watchlist: {coins_html}</p>'
+
+    overall_emoji = SENTIMENT_EMOJI.get(summary.overall_sentiment, "➡️")
+    today = date.today().strftime("%A, %B %-d, %Y")
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0d1117;font-family:'Inter',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr><td align="center" style="padding:24px 16px;">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#161b22;border-radius:12px;border:1px solid #21262d;overflow:hidden;">
+
+        <!-- Header -->
+        <tr><td style="background:linear-gradient(135deg,#0d1117 0%,#1a2332 100%);padding:28px 32px;">
+          <span style="font-size:22px;font-weight:700;color:#f0f6fc;">🧠 CryptoSage AI</span>
+          <span style="display:block;color:#8b949e;font-size:13px;margin-top:4px;">Morning Brief™ — {today}</span>
+        </td></tr>
+
+        <!-- Greeting -->
+        <tr><td style="padding:24px 32px 0;">
+          <p style="margin:0;color:#c9d1d9;font-size:15px;">
+            Good morning{', ' + (user.full_name.split()[0] if user.full_name else '')}! Here's your AI-curated crypto intelligence for today.
+          </p>
+        </td></tr>
+
+        <!-- Overall sentiment -->
+        <tr><td style="padding:16px 32px;">
+          <div style="background:#0d1117;border-radius:8px;padding:16px;border-left:3px solid #00d4aa;">
+            <span style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;">TODAY'S MARKET PULSE</span>
+            <p style="margin:8px 0 4px;color:#f0f6fc;font-size:15px;line-height:1.6;">{summary.executive_summary}</p>
+            <span style="color:#00d4aa;font-size:13px;">{overall_emoji} Overall: <strong>{summary.overall_sentiment.title()}</strong> ({summary.overall_sentiment_score:.0f}/100)</span>
+          </div>
+        </td></tr>
+
+        <!-- Top Stories -->
+        <tr><td style="padding:0 32px 8px;">
+          <p style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px;">TOP STORIES</p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            {stories_html}
+          </table>
+        </td></tr>
+
+        <!-- Key Risk -->
+        <tr><td style="padding:16px 32px;">
+          <div style="background:#1a1a1a;border-radius:8px;padding:14px;border-left:3px solid #f85149;">
+            <span style="color:#f85149;font-size:11px;text-transform:uppercase;letter-spacing:1px;">⚠ KEY RISK TO WATCH</span>
+            <p style="margin:6px 0 0;color:#c9d1d9;font-size:13px;">{summary.key_risk}</p>
+          </div>
+        </td></tr>
+
+        <!-- Watchlist -->
+        {coins_html and f'<tr><td style="padding:0 32px 16px;">{coins_html}</td></tr>'}
+
+        <!-- CTA -->
+        <tr><td style="padding:16px 32px 28px;text-align:center;">
+          <a href="https://cryptosage.ai/dashboard" style="display:inline-block;background:#00d4aa;color:#0d1117;font-weight:700;font-size:14px;padding:12px 28px;border-radius:8px;text-decoration:none;">
+            Open CryptoSage Dashboard →
+          </a>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#0d1117;padding:16px 32px;text-align:center;border-top:1px solid #21262d;">
+          <p style="margin:0;color:#484f58;font-size:11px;">
+            CryptoSage AI · <a href="https://cryptosage.ai/settings/digest" style="color:#484f58;">Unsubscribe</a> · Not financial advice.<br>
+            {summary.total_articles_analyzed} articles analyzed from {summary.sources_covered} sources.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+async def send_morning_brief(user: User, summary: DailySummaryResponse) -> None:
+    """Send the Morning Brief™ email to a single user."""
+    if not user.email:
+        log.warning("digest_no_email", user=str(user.id))
+        return
+
+    html = _build_html(user, summary)
+    today_str = date.today().strftime("%B %-d")
+
+    resend.Emails.send({
+        "from": f"{settings.RESEND_FROM_NAME} <{settings.RESEND_FROM_EMAIL}>",
+        "to": [user.email],
+        "subject": f"☀️ Your Crypto Morning Brief — {today_str}",
+        "html": html,
+    })
+
+    log.info("digest_sent", user=str(user.id), email=user.email)
+
+
+# END: app/services/digest/email_sender.py
+# ======================================================================
+
+# FILE: app/tasks/celery_app.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Celery Application
+Handles background tasks: news ingestion, embedding pipeline, email digests.
+"""
+from celery import Celery
+from celery.schedules import crontab
+from app.core.config import settings
+
+celery_app = Celery(
+    "cryptosage",
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL,
+    include=[
+        "app.tasks.ingest_news",
+        "app.tasks.embed_articles",
+        "app.tasks.send_digests",
+    ],
+)
+
+celery_app.conf.update(
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="UTC",
+    enable_utc=True,
+    task_track_started=True,
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,
+    task_routes={
+        "app.tasks.ingest_news.*":    {"queue": "ingestion"},
+        "app.tasks.embed_articles.*": {"queue": "embedding"},
+        "app.tasks.send_digests.*":   {"queue": "email"},
+    },
+)
+
+# ── Beat Schedule (periodic tasks) ────────────────────────────────────────────
+celery_app.conf.beat_schedule = {
+    # News ingestion: every 2 hours
+    "ingest-news-every-2-hours": {
+        "task": "app.tasks.ingest_news.run_ingestion",
+        "schedule": crontab(minute=0, hour="*/2"),
+        "options": {"queue": "ingestion"},
+    },
+    # Embedding pipeline: every 2 hours + 15 min (after ingestion completes)
+    "embed-new-articles": {
+        "task": "app.tasks.embed_articles.embed_uningested_articles",
+        "schedule": crontab(minute=15, hour="*/2"),
+        "options": {"queue": "embedding"},
+    },
+    # Morning Brief email digest: 8am UTC daily
+    "send-morning-brief": {
+        "task": "app.tasks.send_digests.send_daily_digest",
+        "schedule": crontab(minute=0, hour=8),
+        "options": {"queue": "email"},
+    },
+}
+
+
+# END: app/tasks/celery_app.py
+# ======================================================================
+
+# FILE: app/tasks/ingest_news.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Celery Task: News Ingestion
+Triggered every 2 hours by Celery Beat.
+"""
+import asyncio
+import structlog
+from app.tasks.celery_app import celery_app
+from app.services.ingestion.ingestor import ingest_all_sources
+
+log = structlog.get_logger(__name__)
+
+
+@celery_app.task(
+    name="app.tasks.ingest_news.run_ingestion",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=300,
+    soft_time_limit=600,
+    time_limit=660,
+)
+def run_ingestion(self):
+    """
+    Celery task: runs the full news ingestion pipeline.
+    Fetches from all configured RSS/web sources, deduplicates,
+    tags coins, scores importance, and persists new articles.
+    """
+    log.info("ingestion_task_started")
+    try:
+        stats = asyncio.get_event_loop().run_until_complete(ingest_all_sources())
+        log.info("ingestion_task_complete", **stats)
+        return stats
+    except Exception as exc:
+        log.error("ingestion_task_failed", error=str(exc))
+        raise self.retry(exc=exc)
+
+
+# END: app/tasks/ingest_news.py
+# ======================================================================
+
+# FILE: app/tasks/embed_articles.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Celery Task: Embedding Pipeline
+Picks up newly ingested articles (is_embedded=False) and upserts them into Pinecone.
+Runs every 2h + 15min, after the ingestion task completes.
+"""
+import asyncio
+import structlog
+from sqlalchemy import select, update
+
+from app.tasks.celery_app import celery_app
+from app.core.database import AsyncSessionLocal
+from app.models.article import Article
+from app.services.ai.rag import upsert_batch
+
+log = structlog.get_logger(__name__)
+
+BATCH_SIZE = 50
+
+
+@celery_app.task(
+    name="app.tasks.embed_articles.embed_uningested_articles",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=120,
+    soft_time_limit=900,
+    time_limit=960,
+)
+def embed_uningested_articles(self):
+    """
+    Celery task: fetches articles with is_embedded=False from PostgreSQL,
+    generates embeddings in batches, upserts into Pinecone,
+    and marks articles as embedded.
+    """
+    log.info("embedding_task_started")
+
+    async def _run():
+        total_embedded = 0
+        async with AsyncSessionLocal() as db:
+            # Fetch unembedded articles in batches
+            result = await db.execute(
+                select(Article)
+                .where(Article.is_embedded == False)
+                .where(Article.content.isnot(None))
+                .order_by(Article.ingested_at.asc())
+                .limit(BATCH_SIZE * 10)  # process up to 500 per run
+            )
+            articles = list(result.scalars().all())
+
+            if not articles:
+                log.info("embedding_task_no_new_articles")
+                return 0
+
+            log.info("embedding_task_articles_to_embed", count=len(articles))
+
+            # Process in batches of BATCH_SIZE
+            for i in range(0, len(articles), BATCH_SIZE):
+                batch = articles[i : i + BATCH_SIZE]
+                records = [
+                    {
+                        "id": str(a.id),
+                        "title": a.title,
+                        "content": (a.content or "")[:8000],
+                        "metadata": {
+                            "source_name": a.source_name,
+                            "coins_mentioned": a.coins_mentioned or [],
+                            "sentiment": a.sentiment or "neutral",
+                            "published_at": a.published_at.isoformat() if a.published_at else "",
+                            "url": a.url,
+                        },
+                    }
+                    for a in batch
+                ]
+
+                try:
+                    count = await upsert_batch(records)
+                    # Mark as embedded
+                    article_ids = [a.id for a in batch]
+                    await db.execute(
+                        update(Article)
+                        .where(Article.id.in_(article_ids))
+                        .values(
+                            is_embedded=True,
+                            pinecone_id=None,  # batch upsert sets IDs internally
+                        )
+                    )
+                    await db.commit()
+                    total_embedded += count
+                    log.info("embedding_batch_complete", batch=i // BATCH_SIZE + 1, count=count)
+
+                except Exception as exc:
+                    log.error("embedding_batch_failed", batch=i // BATCH_SIZE + 1, error=str(exc))
+                    # Continue with next batch — don't fail the whole task
+
+        return total_embedded
+
+    try:
+        total = asyncio.get_event_loop().run_until_complete(_run())
+        log.info("embedding_task_complete", total_embedded=total)
+        return {"embedded": total}
+    except Exception as exc:
+        log.error("embedding_task_failed", error=str(exc))
+        raise self.retry(exc=exc)
+
+
+# END: app/tasks/embed_articles.py
+# ======================================================================
+
+# FILE: app/tasks/send_digests.py
+# ----------------------------------------------------------------------
+"""
+CryptoSage AI — Celery Task: Morning Brief™ Email Digest
+Runs at 8am UTC daily. Generates daily summary and emails subscribed users.
+"""
+import asyncio
+import structlog
+from sqlalchemy import select
+
+from app.tasks.celery_app import celery_app
+from app.core.database import AsyncSessionLocal
+from app.models.user import User
+from app.services.ai.summarizer import get_daily_summary
+from app.services.digest.email_sender import send_morning_brief
+
+log = structlog.get_logger(__name__)
+
+BATCH_SIZE = 100   # Send emails in batches to avoid rate limits
+
+
+@celery_app.task(
+    name="app.tasks.send_digests.send_daily_digest",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=600,
+    soft_time_limit=1800,
+    time_limit=1860,
+)
+def send_daily_digest(self):
+    """
+    Celery task: generates the daily digest and emails all subscribed users.
+    Respects each user's digest_frequency and email_digest_enabled flag.
+    """
+    log.info("digest_task_started")
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            # Generate digest once — reused for all users
+            summary = await get_daily_summary(db)
+
+            # Fetch subscribed users (daily digest only)
+            result = await db.execute(
+                select(User)
+                .where(User.is_active == True)
+                .where(User.email_digest_enabled == True)
+                .where(User.digest_frequency == "daily")
+            )
+            users = list(result.scalars().all())
+
+        log.info("digest_task_users", count=len(users))
+        sent = 0
+        failed = 0
+
+        # Send in batches
+        for i in range(0, len(users), BATCH_SIZE):
+            batch = users[i : i + BATCH_SIZE]
+            for user in batch:
+                try:
+                    await send_morning_brief(user=user, summary=summary)
+                    sent += 1
+                except Exception as exc:
+                    log.warning("digest_send_failed", user=str(user.id), error=str(exc))
+                    failed += 1
+
+        return {"sent": sent, "failed": failed, "total_users": len(users)}
+
+    try:
+        stats = asyncio.get_event_loop().run_until_complete(_run())
+        log.info("digest_task_complete", **stats)
+        return stats
+    except Exception as exc:
+        log.error("digest_task_failed", error=str(exc))
+        raise self.retry(exc=exc)
+
+
+# END: app/tasks/send_digests.py
+# ======================================================================
